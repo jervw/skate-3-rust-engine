@@ -1,5 +1,8 @@
 [workspace]
-members = ["crates/skate-core", "crates/skate-data", "crates/skate-game", "crates/skate-dynamics", "crates/skate-mods", "crates/skate-net", "crates/skate-steam-relay"]
+members = ["crates/skate-core", "crates/skate-data", "crates/skate-dynamics", "crates/skate-net"]
+# The headless cut (S1SKATE.md): skate-host is its own workspace, as in the
+# mashup, so that a consumer resolves its dependencies on their own.
+exclude = ["crates/skate-host"]
 resolver = "3"
 
 [workspace.package]
