@@ -1,6 +1,6 @@
 //! ScoreModule integration. The simulation owns recognition and accounting;
 //! the APT movie only consumes the resulting publication.
-use crate::{apt_vm::Value, hud_runtime};
+
 use skate_core::{
     animation::output::attributes::AttributeName,
     physics::filtered_state::FilteredCategory,
@@ -184,28 +184,6 @@ impl Runtime {
     }
     pub(crate) fn stance(&self) -> [bool; 4] {
         self.stance
-    }
-    pub fn hud_input(&self) -> hud_runtime::Input {
-        hud_runtime::Input {
-            sequence_score: self.sequence_score as i32,
-            line_score: self.session.holder.snapshot.line as i32,
-            sequence_timer: (self.session.line.points / self.data.line_drain) as i32,
-            line_time: self.session.line.points / self.data.line_drain,
-            line_capacity: self.data.line_capacity,
-            multiplier: self.session.combo.multiplier,
-            clean: self.clean,
-            sketchy: self.sketchy,
-            stance: self.stance,
-            trick_name: self.trick_name.clone(),
-            trick_metrics: [
-                Value::Text(self.trick_name.clone()),
-                Value::Bool(self.stance[0]),
-                Value::Bool(self.stance[1]),
-                Value::Bool(self.was_bailing),
-                Value::Bool(self.new_trick),
-            ],
-            context_tricks: Vec::new(),
-        }
     }
     fn penalty(&self, id: usize) -> f32 {
         let Some(d) = self.data.by_id(id) else {

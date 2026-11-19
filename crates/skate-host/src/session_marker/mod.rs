@@ -1,18 +1,8 @@
-//! Manual session markers. Automatic bail recovery owns a different checkpoint.
-mod effect;
-mod hud;
-mod noise;
 mod state;
 mod validation;
-use crate::{
-    app::SimulationSet,
-    input::ControllerInput,
-    map_transition::CurrentMap,
-    physics::{GamePhysics, SkaterRuntime},
-};
+use crate::{input::ControllerInput, physics::{GamePhysics, SkaterRuntime}};
 use bevy::prelude::*;
 use skate_core::physics::{board::BodyId, skeleton_animation_record::AnimationPartTransform};
-
 #[derive(Clone, Copy, Debug)]
 struct Marker {
     transform: AnimationPartTransform,
@@ -35,74 +25,17 @@ pub(crate) struct SessionMarker {
     last_batch: u64,
 }
 
-pub(crate) struct SessionMarkerPlugin;
-impl Plugin for SessionMarkerPlugin {
-    fn build(&self, app: &mut App) {
-        let root = &app.world().resource::<crate::config::Config>().asset_root;
-        match validation::Validation::load(root) {
-            Ok(settings) => {
-                app.insert_resource(settings);
-            }
-            Err(e) => {
-                error!("Session marker validation data: {e}");
-                return;
-            }
-        }
-        app.init_resource::<SessionMarker>()
-            .add_systems(
-                PreUpdate,
-                suspend.after(crate::map_transition::MapTransitionSet),
-            )
-            .add_systems(
-                FixedUpdate,
-                update
-                    .after(SimulationSet::Input)
-                    .before(SimulationSet::Controls)
-                    .run_if(crate::graphics_menu::gameplay_active),
-            );
-        hud::install(app);
-        effect::install(app);
+
+pub(crate) struct Runtime { session: SessionMarker, validation: validation::Validation }
+impl Runtime {
+    pub fn load(root: &std::path::Path) -> Result<Self,String> { Ok(Self{session:SessionMarker::default(),validation:validation::Validation::load(root)?}) }
+    pub fn suspend(&mut self) { self.session.hold.cancel(); self.session.blocked_until_release=true; self.session.ui_time=0.; }
+    pub fn collect_time(&mut self,dt:f64) { self.session.ui_time+=dt; }
+    pub fn advance(&mut self,input:&ControllerInput,physics:&GamePhysics,skater:&mut SkaterRuntime) {
+        update(&mut self.session,input,physics,skater,&self.validation);
     }
 }
-
-fn suspend(
-    mut marker: ResMut<SessionMarker>,
-    map: Res<CurrentMap>,
-    menu: Res<crate::graphics_menu::Menu>,
-    replay: Res<crate::replay::Replay>,
-    time: Res<Time<Real>>,
-) {
-    if marker.generation != map.generation {
-        *marker = SessionMarker {
-            generation: map.generation,
-            blocked_until_release: true,
-            ..default()
-        };
-    }
-    if !crate::graphics_menu::gameplay_active(Some(menu)) || replay.active {
-        marker.hold.cancel();
-        marker.visible = false;
-        marker.progress = 0.;
-        marker.blocked_until_release = true;
-        marker.ui_time = 0.;
-    } else if !marker.blocked_until_release {
-        // PlayerUI runs on the UI clock, independently of physics substeps.
-        marker.ui_time += time.delta_secs_f64();
-    }
-}
-
-fn update(
-    mut session: ResMut<SessionMarker>,
-    input: Res<ControllerInput>,
-    map: Res<CurrentMap>,
-    physics: Res<GamePhysics>,
-    mut skater: ResMut<SkaterRuntime>,
-    validation: Res<validation::Validation>,
-    replay: Res<crate::replay::Replay>,
-) {
-    if replay.active {
-        return;
-    }
+fn update(session:&mut SessionMarker,input:&ControllerInput,physics:&GamePhysics,skater:&mut SkaterRuntime,validation:&validation::Validation) {
     let (modifier, set, held) = input.session_marker_actions();
     if session.blocked_until_release {
         if !modifier {
@@ -144,7 +77,7 @@ fn update(
         && validation.check(physics.world(), transform[3]);
     session.can_return = session
         .marker
-        .is_some_and(|m| m.generation == map.generation)
+        .is_some_and(|m| m.generation == 0)
         && !matches!(state, 104 | 502);
     session.visible = modifier;
     // A retained Pad publication must not turn one .pressed into repeated sets.
@@ -154,7 +87,7 @@ fn update(
                 transform,
                 on_board,
                 foot_forward: skater.animation.foot_forward(),
-                generation: map.generation,
+                generation: 0,
             });
         }
     }

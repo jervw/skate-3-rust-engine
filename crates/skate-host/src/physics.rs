@@ -73,10 +73,6 @@ mod biped_air;
 mod known_air;
 mod landing_on_deck;
 mod offboard_audit_trace;
-use crate::{
-    app::{FrameSet, SimulationSet},
-    world::PlayerRoot,
-};
 use bevy::prelude::*;
 pub(crate) use controls::PlayerControls;
 use riding_outputs::RidingOutputs;
@@ -346,6 +342,24 @@ impl GamePhysics {
         })
     }
 
+    /// The material new collision is built with.
+    pub(crate) fn floor_material(&self) -> skate_core::physics::contact::RetailContactMaterial {
+        self.settings.floor_material
+    }
+
+    /// Replaces the static world, as a streamed world's collision around
+    /// the skater changes.
+    pub(crate) fn install_world(
+        &mut self,
+        world: BoardWorld,
+        grind_world: std::sync::Arc<crate::grind_world::StaticProvider>,
+    ) -> Result<(), String> {
+        self.offboard_grab_scene = offboard::grab_scene::Registry::new(&world, Vec::new(), Vec::new())?;
+        self.world = world;
+        self.grind_world = grind_world;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn advance_board(&mut self) -> Result<(), String> {
         self.board.clear_forces();
@@ -383,87 +397,6 @@ impl GamePhysics {
 #[cfg(test)]
 #[path = "tests/map_startup.rs"]
 mod map_startup;
-
-pub(crate) struct PhysicsPlugin;
-impl Plugin for PhysicsPlugin {
-    fn build(&self, app: &mut App) {
-        let period = app.world().resource::<GamePhysics>().clock.period();
-        let asset_root = app
-            .world()
-            .resource::<crate::config::Config>()
-            .asset_root
-            .clone();
-        let controls = PlayerControls::load(&asset_root)
-            .unwrap_or_else(|error| panic!("Cannot initialize trick gesture recognizers: {error}"));
-        app.insert_resource(Time::<Fixed>::from_duration(period))
-            .insert_resource(controls)
-            .add_systems(
-                FixedUpdate,
-                controls::sample.in_set(SimulationSet::Controls),
-            )
-            .add_systems(FixedUpdate, advance.in_set(SimulationSet::Physics))
-            .add_systems(Update, present.in_set(FrameSet::Physics));
-    }
-}
-
-pub(crate) fn advance(
-    mut physics: ResMut<GamePhysics>,
-    mut skater: ResMut<SkaterRuntime>,
-    mut controls: ResMut<PlayerControls>,
-    graphs: Res<crate::graph_runtime::StockGraphs>,
-    input: Res<crate::input::PublishedTickInput>,
-    mut camera: ResMut<crate::camera::CameraRuntime>,
-    mut cadence: ResMut<Time<Fixed>>,
-    mut exit: MessageWriter<AppExit>,
-    mut performance: Option<ResMut<crate::performance::Performance>>,
-    mods: Option<Res<crate::modding::Mods>>,
-) {
-    if physics.failed {
-        return;
-    }
-    if mods
-        .as_ref()
-        .is_some_and(|m| crate::modding::player_attached(m) || crate::modding::player_suspended(m))
-    {
-        return;
-    }
-    let timer = performance.as_ref().map(|_| std::time::Instant::now());
-    let mut actions = input.0.actions();
-    let input_available = input.0.controller_available();
-    #[cfg(debug_assertions)]
-    let _physics_trace = dev_trace::begin(&physics, &skater, *input.0.actions().values());
-    if let Err(message) = frame::advance(
-        &mut physics,
-        &mut skater,
-        &mut controls,
-        &graphs,
-        &mut actions,
-        input_available,
-        &mut camera,
-    ) {
-        #[cfg(debug_assertions)]
-        dev_trace::dump(&format!("tick={} physics_error={message}", physics.ticks));
-        physics.failed = true;
-        error!(
-            "{message}; state={:?}; tick={}; mapped_input={:?}; force_mode={}; board_axis_y={}; flags={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
-            skater.player_state.current(),
-            physics.ticks,
-            input.0.actions(),
-            skater.skeleton_input.force_mode,
-            skater.skeleton_input.drive_frames[0][2][1],
-            skater.player_input.processed.flags_2468,
-            skater.player_input.processed.flags_2472,
-            skater.player_input.processed.flags_2476,
-            skater.player_input.processed.flags_2480,
-            skater.player_input.processed.flags_2484,
-        );
-        exit.write(AppExit::error());
-    }
-    cadence.set_timestep(physics.clock.period());
-    if let (Some(performance), Some(timer)) = (performance.as_mut(), timer) {
-        performance.physics(timer.elapsed());
-    }
-}
 
 impl GamePhysics {
     fn finish_skater(&mut self, skater: &mut SkaterRuntime) -> Result<(), String> {
@@ -557,22 +490,7 @@ mod air_tests;
 #[path = "tests/wipeout_playback.rs"]
 mod wipeout_tests;
 
-fn present(
-    physics: Res<GamePhysics>,
-    history: Res<crate::presentation::Presentation>,
-    replay: Res<crate::replay::Replay>,
-    time: Res<Time<Fixed>>,
-    mut roots: Query<&mut Transform, With<PlayerRoot>>,
-) {
-    if physics.failed {
-        return;
-    }
-    let Some((previous, current, alpha)) = history.view(&replay, time.overstep_fraction()) else { return; };
-    for mut root in &mut roots {
-        *root = crate::presentation::blend(previous.root, current.root,
-            alpha);
-    }
-}
+
 
 #[cfg(test)]
 #[path = "tests/powerslide_playback.rs"]
@@ -617,3 +535,4 @@ mod gameplay_gesture_tests;
 #[cfg(test)]
 #[path = "tests/difficulty.rs"]
 mod difficulty_tests;
+pub mod bridge;

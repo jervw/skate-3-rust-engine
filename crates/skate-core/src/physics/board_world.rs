@@ -125,6 +125,7 @@ pub struct BoardWorld {
     query_index: query_index::QueryIndex,
     maximum_fatness: f32,
     maximum_triangle_margin: f32,
+    imported_floor_seams: bool,
     contacts: Vec<BoardCollision>,
     buffer: ContactBuffer,
 }
@@ -169,6 +170,7 @@ impl BoardWorld {
             query_index: query_index::QueryIndex::default(),
             maximum_fatness,
             maximum_triangle_margin,
+            imported_floor_seams: false,
             contacts: Vec::new(),
             buffer: ContactBuffer {
                 count: 0,
@@ -213,6 +215,13 @@ impl BoardWorld {
 
     pub fn triangles(&self) -> &[WorldTriangle] {
         &self.triangles
+    }
+
+    /// Imported brush floors can meet at split edges without sharing vertices.
+    /// Their continuation is checked at the contact point rather than marking
+    /// the entire edge smooth, which would erase a real ledge on an open span.
+    pub fn enable_imported_floor_seams(&mut self) {
+        self.imported_floor_seams = true;
     }
 
     /// Board wheel segments use zero query radius; rounded world triangles
@@ -327,13 +336,20 @@ impl BoardWorld {
         let bounds = bounds
             .and_then(|b| Bounds::from_points(b.iter().flat_map(|b| [b.min, b.max])))
             .map(|b| b.expanded(padding));
-        let ranges = self.candidate_ranges(bounds);
+        let candidates: Vec<_> = self
+            .candidate_ranges(bounds)
+            .into_iter()
+            .flatten()
+            .collect();
+        let triangles = &self.triangles;
+        let triangle_bounds = &self.triangle_bounds;
+        let imported_floor_seams = self.imported_floor_seams;
         let output = &mut self.contacts;
         let mut publish = |records: &[ContactRecord]| {
             output.extend(records.iter().map(collision_from_record));
         };
-        for index in ranges.into_iter().flatten() {
-            let entry = &self.triangles[index];
+        for &index in &candidates {
+            let entry = &triangles[index];
             for (volume, volume_bounds) in volumes.iter().zip(&volume_bounds) {
                 if self.query_metadata.is_some()
                     && volume_bounds.is_some_and(|b| !self.triangle_bounds[index].overlaps(b))
@@ -350,6 +366,19 @@ impl BoardWorld {
                 };
                 let material = combine_contact_materials(volume.material, entry.material);
                 for pair in &manifold.points[..manifold.count] {
+                    if imported_floor_seams
+                        && imported_internal_floor_edge(
+                            index,
+                            entry,
+                            pair.b,
+                            manifold.normal,
+                            &candidates,
+                            triangles,
+                            triangle_bounds,
+                        )
+                    {
+                        continue;
+                    }
                     let contact = RetailContactInput {
                         position_on_a: pair.a,
                         position_on_b: pair.b,
@@ -382,6 +411,109 @@ impl BoardWorld {
     pub fn dropped_contacts(&self) -> u32 {
         self.buffer.dropped
     }
+}
+
+fn imported_internal_floor_edge(
+    source_index: usize,
+    source: &WorldTriangle,
+    contact: Vector3,
+    contact_normal: Vector3,
+    candidates: &[usize],
+    triangles: &[WorldTriangle],
+    bounds: &[Bounds],
+) -> bool {
+    let face = source.triangle.feature.normal;
+    let lateral = contact_normal.x.hypot(contact_normal.z);
+    if lateral < 0.05 {
+        return false;
+    }
+    let probe = |sign: f32| {
+        Vector3::new(
+            contact.x + sign * 0.005 * contact_normal.x / lateral,
+            contact.y,
+            contact.z + sign * 0.005 * contact_normal.z / lateral,
+        )
+    };
+    if face.y >= 0.98 && contact_normal.y > 0.05 {
+        // A floor triangle's exposed edge is internal only where another
+        // coplanar floor covers the point immediately beyond it.
+        let mut beyond = probe(1.);
+        let origin = source.triangle.vertices[0];
+        beyond.y =
+            origin.y - (face.x * (beyond.x - origin.x) + face.z * (beyond.z - origin.z)) / face.y;
+        return !point_in_floor_triangle(beyond, source.triangle.vertices)
+            && floor_at(
+                beyond,
+                Some(source_index),
+                Some(face),
+                candidates,
+                triangles,
+                bounds,
+            );
+    }
+    // A brush side ending at floor height is also internal when the same
+    // floor spans both sides. This catches buried sides of overlapping brush
+    // boxes without removing a true curb or a wall rising above the floor.
+    if face.y.abs() > 0.2
+        || source
+            .triangle
+            .vertices
+            .iter()
+            .any(|p| p.y > contact.y + 0.01)
+    {
+        return false;
+    }
+    floor_at(probe(-1.), None, None, candidates, triangles, bounds)
+        && floor_at(probe(1.), None, None, candidates, triangles, bounds)
+}
+
+fn floor_at(
+    probe: Vector3,
+    excluded: Option<usize>,
+    reference: Option<Vector3>,
+    candidates: &[usize],
+    triangles: &[WorldTriangle],
+    bounds: &[Bounds],
+) -> bool {
+    candidates.iter().any(|&other_index| {
+        if excluded == Some(other_index) {
+            return false;
+        }
+        let other = &triangles[other_index];
+        let normal = other.triangle.feature.normal;
+        if normal.y < 0.98
+            || reference.is_some_and(|face| {
+                face.x * normal.x + face.y * normal.y + face.z * normal.z < 0.999
+            })
+        {
+            return false;
+        }
+        let b = bounds[other_index];
+        if probe.x < b.min.x - 0.001
+            || probe.x > b.max.x + 0.001
+            || probe.z < b.min.z - 0.001
+            || probe.z > b.max.z + 0.001
+        {
+            return false;
+        }
+        let p = other.triangle.vertices;
+        let plane_gap = (other.triangle.feature.normal.x * (probe.x - p[0].x)
+            + other.triangle.feature.normal.y * (probe.y - p[0].y)
+            + other.triangle.feature.normal.z * (probe.z - p[0].z))
+            .abs();
+        plane_gap <= 0.002 && point_in_floor_triangle(probe, p)
+    })
+}
+
+fn point_in_floor_triangle(point: Vector3, vertices: [Vector3; 3]) -> bool {
+    let cross =
+        |a: Vector3, b: Vector3, p: Vector3| (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
+    let winding = cross(vertices[0], vertices[1], vertices[2]).signum();
+    (0..3).all(|i| {
+        let a = vertices[i];
+        let b = vertices[(i + 1) % 3];
+        winding * cross(a, b, point) >= -0.001 * (b.x - a.x).hypot(b.z - a.z)
+    })
 }
 
 /// Retention reads only contact header geometry, body IDs and material/tag.

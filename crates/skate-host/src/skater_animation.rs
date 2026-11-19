@@ -38,7 +38,15 @@ pub(crate) struct AnimationSource {
     evaluator: Arc<PoseEvaluator>,
 }
 impl AnimationSource {
-    fn load(root: &Path) -> Result<Arc<Self>, String> {
+    pub(crate) fn load(root: &Path) -> Result<Arc<Self>, String> {
+        static CACHE: std::sync::Mutex<Option<(std::path::PathBuf, Arc<AnimationSource>)>> = std::sync::Mutex::new(None);
+        let mut cache = CACHE.lock().map_err(|_| "Animation cache lock poisoned")?;
+        if let Some((path, source)) = &*cache { if path == root { return Ok(source.clone()); } }
+        let source = Self::load_uncached(root)?;
+        *cache = Some((root.to_owned(), source.clone()));
+        Ok(source)
+    }
+    fn load_uncached(root: &Path) -> Result<Arc<Self>, String> {
         let banks = skate_data::animation_banks::AnimationBanks::load(root)?;
         let mut evaluator = PoseEvaluator::from_banks(&banks)?;
         evaluator.load_authored_clips(root)?;

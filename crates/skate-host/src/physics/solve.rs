@@ -46,7 +46,10 @@ fn advance_inner(
     let mut skeleton_query = physics.query;
     skeleton_query.edge_cos_bend_normal_threshold = -1.0;
     let mut skeleton_world_volumes = skeleton_volumes.clone();
-    skeleton_colliders::retain_world_volumes(&mut skeleton_world_volumes, &skater.skeleton_collision);
+    skeleton_colliders::retain_world_volumes(
+        &mut skeleton_world_volumes,
+        &skater.skeleton_collision,
+    );
     contacts.extend_from_slice(physics.world.query_primitives(
         &skeleton_world_volumes,
         skeleton_query,
@@ -121,9 +124,13 @@ fn advance_inner(
     skater.mod_contact_frame.joint_loads=crate::modding::player_physics::joint_loads(skater,&joints,dt);
     physics.network_proxies.capture_dynamics_reactions(physics.board.solved_reactions(), dt);
     if let Err(error) = diagnostics::validate(
-        &diagnostics::snapshot(physics, skater), "after shared solve",
+        &diagnostics::snapshot(physics, skater),
+        "after shared solve",
     ) {
-        return Err(format!("{error}; input_bodies={before:?}; contacts={contacts:?}; joints={joints:?}; drives={:?}", drives.rows));
+        return Err(format!(
+            "{error}; input_bodies={before:?}; contacts={contacts:?}; joints={joints:?}; drives={:?}",
+            drives.rows
+        ));
     }
     skater
         .skeleton
